@@ -1,0 +1,32 @@
+services:
+  vps-monitor:
+    image: ${GHCR_IMAGE:?Set GHCR_IMAGE in .env}:${IMAGE_TAG:-latest}
+    container_name: vps-monitor
+    hostname: ${SERVER_NAME:-vps-monitor}
+    restart: unless-stopped
+    environment:
+      MONITOR_API_KEY: ${MONITOR_API_KEY:?Set MONITOR_API_KEY in .env}
+      SERVER_NAME: ${SERVER_NAME:-unknown-server}
+      TZ: ${TZ:-UTC}
+    ports:
+      # Keep localhost-only until the primary dashboard is ready.
+      # Later, bind to a private VPN IP or a public interface protected by firewall rules.
+      - "${MONITOR_BIND_IP:-127.0.0.1}:8765:8765"
+    volumes:
+      - /proc:/host/proc:ro
+      - /:/host/root:ro
+      - /etc/timezone:/host/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
