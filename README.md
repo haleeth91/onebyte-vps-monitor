@@ -2,46 +2,48 @@
 
 A lightweight, reusable Docker-based system metrics API for remote VPSs. Run the same image on each secondary VPS, with a separate server name, timezone, and API key per server.
 
-The central dashboard is expected to collect metrics from these agents. This container does not host the dashboard itself.
+The central dashboard collects metrics from these agents. This container does not host the dashboard itself.
 
-## Current image and build status
+## Container image
 
 - **GitHub repository:** [haleeth91/onebyte-vps-monitor](https://github.com/haleeth91/onebyte-vps-monitor)
 - **Container image:** `ghcr.io/haleeth91/onebyte-vps-monitor:latest`
-- **Registry:** GitHub Container Registry (GHCR)
-- **Package visibility:** Keep the GHCR package private.
-- **Latest verified build:** GitHub Actions run [#1 — successful](https://github.com/haleeth91/onebyte-vps-monitor/actions/runs/43867379235)
 - **Supported platforms:** `linux/amd64` and `linux/arm64`
 
-The workflow at `.github/workflows/docker-publish.yml` runs on pushes to `main`, version tags matching `v*`, and pull requests targeting `main`. Pushes to `main` publish the `latest` tag; version tags publish corresponding version tags. Pull requests build for validation but do not publish an image.
+The GitHub Actions workflow builds and publishes the image when changes are pushed to `main), and publishes version tags for `v*` tags.
 
-## Metrics and endpoints
+## API
 
-`GET /api/system` returns:
+### `GET /api/system`
 
-- Server name and online status
-- Host-local timestamp and timezone
-- CPU usage percentage, logical core count, and estimated used cores
-- Host RAM usage and percentage
-- Root filesystem storage usage and percentage
-- Host uptime in seconds
+Requires the `X-API-Key` header. Returns server identity, timestamp/timezone, CPU, RAM, root filesystem storage, host uptime, and Docker container inventory.
 
-`GET /health` is an unauthenticated local health check for Docker.
+The `docker` object includes:
+- `available`: whether the Docker API could be queried
+- `total`: total containers, including stopped containers
+- `running`: containers whose Docker state is `running`
+- `stopped`: all containers not currently in the `running` state
+- `containers`: sorted list with container name, image, Docker state, and uptime in seconds
 
-The `/api/system` endpoint requires the `X-API-Key` request header.
+Container uptime is calculated from Docker's `StartedAt` value for running containers. Non-running containers have `uptime_seconds: null). If Docker inventory cannot be queried, system metrics remain available and `docker.available` is false with an error type.
+
+### `GET /health`
+
+Unauthenticated local health check for Docker. Returns `{"status":"ok"}`.
 
 ## Deploy on a secondary VPS
 
-The same image can be used on each secondary VPS. The values in `.env` are specific to that VPS.
+The same image and Compose file can be used on each secondary VPS. Set a unique server name and API key per VPS.
 
 ### 1. Create the deployment directory
 
 ```bash
-mkdir -p ~/onebyte-vps-monitor
-cd ~/onebyte-vps-monitor
+sudo mkdir -p /opt/apps/onebyte-vps-monitor
+sudo chown "$USER":"$(id -gn)" /opt/apps/onebyte-vps-monitor
+cd /opt/apps/onebyte-vps-monitor
 ```
 
-Copy `docker-compose.yml` from this repository into this directory. Create a local `.env` file with the following settings, adjusting the server name and timezone for the VPS:
+Copy `docker-compose.yml` from this repository into the directory. Create a local `.env` file:
 
 ```dotenv
 GHCR_IMAGE=ghcr.io/haleeth91/onebyte-vps-monitor
@@ -52,82 +54,61 @@ MONITOR_API_KEY=REPLACE_WITH_A_UNIQUE_RANDOM_SECRET
 MONITOR_BIND_IP=127.0.0.1
 ```
 
-Generate a strong API key on the VPS:
+Generate a strong unique API key:
 
 ```bash
 openssl rand -hex 32
 ```
 
-Use a different API key for every VPS. Keep `.env` private and never commit it to Git.
+Keep `.env` private and never commit it to Git.
 
-### 2. Authenticate to the private GHCR package
+### 2. Pull and start
 
-Create a **GitHub Personal Access Token (classic)** with the `read:packages` scope. Use that token to authenticate Docker on each VPS:
-
-```bash
-echo "YOUR_GITHUB_TOKEN" | docker login ghcr.io -u haleeth91 --password-stdin
-```
-
-Do not put the token in the Compose file or commit it to the repository. If GitHub requires it, ensure the token has access to the private package.
-
-### 3. Pull and start the container
+Authenticate to GHCR if the package requires it, then run:
 
 ```bash
 docker compose pull
 docker compose up -d
-```
-
-Check the container and its health:
-
-```bash
 docker compose ps
 curl -s http://127.0.0.1:8765/health
 ```
 
-Test the authenticated metrics endpoint:
+Test the authenticated endpoint without sharing the key:
 
 ```bash
 API_KEY=$(grep '^MONITOR_API_KEY=' .env | cut -d= -f2)
 curl -s -H "X-API-Key: $API_KEY" http://127.0.0.1:8765/api/system
+unset API_KEY
 ```
 
-Expected health response:
+## Updating
 
-```json
-{"status":"ok"}
-```
-
-## Updating the image
-
-When code is pushed to `main`, GitHub Actions builds and publishes a new `latest` image. Wait for the workflow to finish successfully, then run on each VPS:
+After a successful GitHub Actions build, update each VPS:
 
 ```bash
 docker compose pull
 docker compose up -d
 ```
 
-For controlled production rollouts, use a version tag in `.env`, such as `IMAGE_TAG=v1.0.1`, after pushing that tag to GitHub. Keep the previous version tag available so you can roll back by changing `IMAGE_TAG` and pulling again.
+For controlled rollouts, pin `IMAGE_TAG` to a version tag rather than `latest`. Keep the previous image tag available for rollback.
 
-## Network security
+## Docker API security
 
-The Compose file binds port `8765` to `127.0.0.1` by default. This is intentional during the initial setup and means the future central dashboard cannot reach the agent remotely yet.
+The monitoring application does **not** mount the Docker socket. Compose runs a separate Docker Socket Proxy with only the container API enabled and POST requests disabled. The proxy and monitor share a dedicated internal Docker network; the proxy is not published to the host or internet. The proxy needs access to the host Docker socket, so keep its image trusted and updated.
 
-When the dashboard is ready, change `MONITOR_BIND_IP` to a private VPN address or another deliberately selected interface. Restrict inbound TCP/8765 with the VPS firewall so only the dashboard host can connect. Do not expose this API publicly without appropriate firewall restrictions and HTTPS or a private network.
+The monitor lists all containers, including itself and the socket-proxy helper. It only reads container metadata and start times; it does not start, stop, or modify containers.
 
 ## Host metrics and container permissions
 
-The container mounts the host's `/proc` and root filesystem read-only to read host-level metrics. It does not mount the Docker socket and does not discover or control other containers; Docker app discovery is a separate planned phase.
+The monitor mounts the host's `/proc` and root filesystem read-only to read host-level metrics. It uses a read-only root filesystem, drops Linux capabilities, enables `no-new-privileges`, and mounts host paths read-only.
 
-The container uses a read-only root filesystem, drops Linux capabilities, enables `no-new-privileges`, and mounts host paths read-only.
-
-## Per-server configuration reference
+## Configuration reference
 
 | Variable | Purpose | Example |
 |---|---|---|
-| `GHCR_IMAGE` | Published container image | `ghcr.io/haleeth91/onebyte-vps-monitor` |
-| `IMAGE_TAG` | Image version to run | `latest` |
-| `SERVER_NAME` | Name returned by the API | `prime.mirae.top` |
+| `GHCR_IMAGE` | Published image | `ghcr.io/haleeth91/onebyte-vps-monitor` |
+| `IMAGE_TAG` | Image version | `latest` |
+| `SERVER_NAME` | Server name returned by API | `prime.mirae.top` |
 | `TZ` | Server timezone | `Asia/Colombo` |
-| `MONITOR_API_KEY` | Secret required by `/api/system` | Unique random value |
+| `MONITOR_API_KEY` | Secret for `/api/system` | Unique random value |
 | `MONITOR_BIND_IP` | Host interface for port 8765 | `127.0.0.1` |
-
