@@ -1,4 +1,25 @@
 services:
+  # Exposes only the read-only Docker API endpoints needed by the monitor.
+  # The Docker socket is never mounted into the monitor application itself.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: vps-monitor-docker-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: "1"
+      POST: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - monitor-internal
+    read_only: true
+    tmpfs:
+      - /run:size=8m,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
   vps-monitor:
     image: ${GHCR_IMAGE:?Set GHCR_IMAGE in .env}:${IMAGE_TAG:-latest}
     container_name: vps-monitor
@@ -8,15 +29,16 @@ services:
       MONITOR_API_KEY: ${MONITOR_API_KEY:?Set MONITOR_API_KEY in .env}
       SERVER_NAME: ${SERVER_NAME:-unknown-server}
       TZ: ${TZ:-UTC}
+      DOCKER_API_URL: http://docker-socket-proxy:2375
     ports:
-      # Keep localhost-only until the primary dashboard is ready.
-      # Later, bind to a private VPN IP or a public interface protected by firewall rules.
       - "${MONITOR_BIND_IP:-127.0.0.1}:8765:8765"
     volumes:
       - /proc:/host/proc:ro
       - /:/host/root:ro
       - /etc/timezone:/host/timezone:ro
       - /etc/localtime:/etc/localtime:ro
+    networks:
+      - monitor-internal
     read_only: true
     tmpfs:
       - /tmp:size=16m,noexec,nosuid
@@ -30,3 +52,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+networks:
+  monitor-internal:
+    internal: true
